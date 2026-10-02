@@ -1,0 +1,13 @@
+subscription_id = "00000000-0000-0000-0000-000000000000"
+workload        = "aiops"
+environment     = "dev"
+location        = "centralindia"
+
+aks_admin_group_object_ids = ["<entra-group-object-id>"]
+
+# Cost guard (required if monthly_budget_amount > 0)
+monthly_budget_amount = 50
+budget_contact_emails = ["you@example.com"]
+
+# Strongly recommended on a public API server
+# api_server_authorized_ip_ranges = ["<your-public-ip>/32"]
