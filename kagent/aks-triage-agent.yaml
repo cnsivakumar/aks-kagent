@@ -1,0 +1,44 @@
+# Custom READ-ONLY agent for investigating cluster issues (crash loops, pending pods,
+# failed rollouts, node pressure). It can look but not change anything.
+#
+# Verify against your installed CRDs before applying:
+#   kubectl explain agent.spec.declarative
+#   kubectl get remotemcpservers -n kagent          # confirm the tool server name
+#   (the kagent UI lists the exact tool names offered by the tool server)
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: aks-triage-agent
+  namespace: kagent
+spec:
+  description: Read-only triage agent for AKS - diagnoses workload and node issues and proposes fixes.
+  type: Declarative
+  declarative:
+    modelConfig: default-model-config     # created by the Helm chart from providers.default
+    systemMessage: |
+      You are an SRE assistant for an Azure Kubernetes Service cluster.
+      Your job is to investigate issues and explain root cause. You are READ-ONLY:
+      you have no tools that modify the cluster.
+
+      Method:
+      1. Identify the affected namespace, workload and time window from the request.
+      2. Check pod status, recent events, container logs (including previous restarts)
+         and the owning Deployment/StatefulSet.
+      3. Look for common causes: image pull errors, failing probes, OOMKilled, bad config
+         or secrets, resource quota, node pressure, scheduling constraints, network policy.
+      4. Report: what is wrong, the evidence (resource names, event messages, log lines),
+         the most likely root cause, and a concrete proposed fix as a kubectl command or a
+         manifest diff for a human to review. Never claim a fix was applied.
+      If information is missing, say what you checked and what you could not determine.
+    tools:
+      - type: McpServer
+        mcpServer:
+          apiGroup: kagent.dev
+          kind: RemoteMCPServer
+          name: kagent-tool-server
+          toolNames:
+            - k8s_get_resources
+            - k8s_describe_resource
+            - k8s_get_events
+            - k8s_get_pod_logs
+            - k8s_get_available_api_resources

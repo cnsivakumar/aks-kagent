@@ -1,0 +1,178 @@
+name: terraform
+
+on:
+  pull_request:
+    paths:
+      - "**/*.tf"
+      - "environments/**"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**/*.tf"
+      - "environments/**"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply after planning (requires approval of the 'production' environment)"
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write        # OIDC to Azure
+  contents: read
+  pull-requests: write   # plan comment
+
+# Serialise runs: one writer to the state at a time, never cancel an apply midway.
+concurrency:
+  group: terraform-aks-kagent
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.9.8"
+  TFVARS_FILE: environments/dev.tfvars
+  TF_IN_AUTOMATION: "true"
+  # azurerm provider + azurerm backend authenticate with the GitHub OIDC token
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  # Terraform input variables (list values are JSON, e.g. ["<group-object-id>"])
+  TF_VAR_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_aks_admin_group_object_ids: ${{ vars.AKS_ADMIN_GROUP_OBJECT_IDS }}
+  TF_VAR_budget_contact_emails: ${{ vars.BUDGET_CONTACT_EMAILS }}
+  # Remote state location
+  TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+  TFSTATE_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+  TFSTATE_CONTAINER: ${{ vars.TFSTATE_CONTAINER }}
+
+jobs:
+  plan:
+    name: fmt / validate / plan
+    runs-on: ubuntu-latest
+    # PRs from forks get no OIDC token; skip them instead of failing.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure remote state backend
+        shell: bash
+        run: |
+          cat > backend.tf <<TFEOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "${TFSTATE_RESOURCE_GROUP}"
+              storage_account_name = "${TFSTATE_STORAGE_ACCOUNT}"
+              container_name       = "${TFSTATE_CONTAINER}"
+              key                  = "aks-kagent.tfstate"
+              use_oidc             = true
+              use_azuread_auth     = true
+            }
+          }
+          TFEOF
+
+      - name: Format check
+        run: terraform fmt -check -recursive -diff
+
+      - name: Init
+        run: terraform init -input=false
+
+      - name: Validate
+        run: terraform validate -no-color
+
+      - name: Plan
+        shell: bash
+        run: |
+          terraform plan -input=false -no-color -lock-timeout=5m \
+            -var-file="$TFVARS_FILE" -out=tfplan
+          # show masks sensitive values; the binary plan itself is NOT uploaded as an
+          # artifact because plan files can contain secrets (e.g. the OpenAI key).
+          terraform show -no-color tfplan > plan.txt
+
+      - name: Job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### Terraform plan'
+            echo '```'
+            head -c 60000 plan.txt 2>/dev/null || echo "(no plan output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = fs.existsSync('plan.txt') ? fs.readFileSync('plan.txt', 'utf8') : '(no plan output)';
+            if (plan.length > 60000) plan = plan.slice(0, 60000) + '\n... (truncated, see job summary)';
+            const marker = '<!-- tf-plan -->';
+            const body = `${marker}\n### Terraform plan\n\n\`\`\`\n${plan}\n\`\`\``;
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo, issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }
+
+  apply:
+    name: apply
+    needs: plan
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.apply)
+    runs-on: ubuntu-latest
+    # Configure required reviewers on this environment: that is the approval gate.
+    # Read the plan in the previous job's summary before approving.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure remote state backend
+        shell: bash
+        run: |
+          cat > backend.tf <<TFEOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "${TFSTATE_RESOURCE_GROUP}"
+              storage_account_name = "${TFSTATE_STORAGE_ACCOUNT}"
+              container_name       = "${TFSTATE_CONTAINER}"
+              key                  = "aks-kagent.tfstate"
+              use_oidc             = true
+              use_azuread_auth     = true
+            }
+          }
+          TFEOF
+
+      - run: terraform init -input=false
+
+      # Re-plans and applies in one step: if reality drifted since the reviewed plan,
+      # this applies the new diff. Keep the approval window short.
+      - name: Apply
+        run: terraform apply -input=false -auto-approve -lock-timeout=5m -var-file="$TFVARS_FILE"
+
+      - name: Outputs
+        shell: bash
+        run: |
+          {
+            echo '### Terraform outputs'
+            echo '```'
+            terraform output
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

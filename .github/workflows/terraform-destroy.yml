@@ -1,0 +1,67 @@
+name: terraform-destroy
+
+# Manual teardown to stop all spend. Type "destroy" to confirm; the 'production'
+# environment approval still applies.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm'
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-aks-kagent
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.9.8"
+  TFVARS_FILE: environments/dev.tfvars
+  TF_IN_AUTOMATION: "true"
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_aks_admin_group_object_ids: ${{ vars.AKS_ADMIN_GROUP_OBJECT_IDS }}
+  TF_VAR_budget_contact_emails: ${{ vars.BUDGET_CONTACT_EMAILS }}
+  TFSTATE_RESOURCE_GROUP: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+  TFSTATE_STORAGE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+  TFSTATE_CONTAINER: ${{ vars.TFSTATE_CONTAINER }}
+
+jobs:
+  destroy:
+    if: inputs.confirm == 'destroy'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure remote state backend
+        shell: bash
+        run: |
+          cat > backend.tf <<TFEOF
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "${TFSTATE_RESOURCE_GROUP}"
+              storage_account_name = "${TFSTATE_STORAGE_ACCOUNT}"
+              container_name       = "${TFSTATE_CONTAINER}"
+              key                  = "aks-kagent.tfstate"
+              use_oidc             = true
+              use_azuread_auth     = true
+            }
+          }
+          TFEOF
+
+      - run: terraform init -input=false
+
+      - name: Destroy
+        run: terraform destroy -input=false -auto-approve -lock-timeout=5m -var-file="$TFVARS_FILE"

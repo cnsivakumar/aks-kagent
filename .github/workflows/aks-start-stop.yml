@@ -1,0 +1,47 @@
+name: aks-start-stop
+
+# Cost saver for a personal subscription: stopping AKS ends node compute charges
+# (disks, public IP etc. still bill). Manual start/stop any time; nightly auto-stop is
+# opt-in via the repository variable AKS_AUTO_STOP=true.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "start or stop the cluster"
+        type: choice
+        options: [start, stop]
+        required: true
+  schedule:
+    - cron: "30 17 * * *"   # UTC - adjust to your time zone
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  power:
+    if: github.event_name == 'workflow_dispatch' || vars.AKS_AUTO_STOP == 'true'
+    runs-on: ubuntu-latest
+    env:
+      ACTION: ${{ github.event_name == 'schedule' && 'stop' || inputs.action }}
+      AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+      AKS_NAME: ${{ vars.AKS_NAME }}
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Start/stop if needed
+        shell: bash
+        run: |
+          state="$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_NAME" --query powerState.code -o tsv)"
+          echo "Current power state: $state; requested: $ACTION"
+          if [[ "$ACTION" == "stop" && "$state" == "Running" ]]; then
+            az aks stop -g "$AKS_RESOURCE_GROUP" -n "$AKS_NAME"
+          elif [[ "$ACTION" == "start" && "$state" == "Stopped" ]]; then
+            az aks start -g "$AKS_RESOURCE_GROUP" -n "$AKS_NAME"
+          else
+            echo "Nothing to do."
+          fi

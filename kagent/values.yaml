@@ -1,0 +1,62 @@
+# Helm values for the kagent chart (oci://ghcr.io/kagent-dev/kagent/helm/kagent)
+# Sized for the small, cost-optimised AKS cluster in this repo.
+#
+# Check keys against the chart version you install:
+#   helm show values oci://ghcr.io/kagent-dev/kagent/helm/kagent --version <ver>
+#
+# The API key, endpoint and deployment name are NOT in this file;
+# install.sh passes them with --set so nothing sensitive is stored in a file.
+
+# ---------------- LLM provider: Azure OpenAI ----------------
+providers:
+  default: azureOpenAI
+  azureOpenAI:
+    provider: AzureOpenAI
+    model: gpt-4o-mini            # must match the Terraform model deployment
+    config:
+      apiVersion: "2024-10-21"    # Azure OpenAI API version; adjust if needed
+      # azureEndpoint   -> --set providers.azureOpenAI.config.azureEndpoint=...
+      # azureDeployment -> --set providers.azureOpenAI.config.azureDeployment=...
+    # apiKey            -> --set providers.azureOpenAI.apiKey=...
+
+# ---------------- Built-in agents ----------------
+# Each enabled agent runs as its own pod. Enable only what you use.
+k8s-agent:
+  enabled: true               # Kubernetes troubleshooting / operations
+helm-agent:
+  enabled: true               # inspect and manage Helm releases
+
+observability-agent:
+  enabled: false              # needs Prometheus/Grafana
+promql-agent:
+  enabled: false
+istio-agent:
+  enabled: false
+kgateway-agent:
+  enabled: false
+argo-rollouts-agent:
+  enabled: false
+cilium-policy-agent:
+  enabled: false
+cilium-manager-agent:
+  enabled: false
+cilium-debug-agent:
+  enabled: false
+
+# ---------------- Resource requests/limits (small nodes) ----------------
+# Key names are from memory of the chart layout - confirm with `helm show values`.
+controller:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+ui:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi

@@ -34,3 +34,7 @@ output "kagent_identity_client_id" {
 output "log_analytics_workspace_id" {
   value = azurerm_log_analytics_workspace.this.id
 }
+
+output "openai_account_name" {
+  value = azurerm_cognitive_account.openai.name
+}
